@@ -14,7 +14,11 @@ export async function buildApp(){
  const origin=process.env.APP_ORIGIN||'http://localhost:3000';
  if(process.env.NODE_ENV==='production'&&(!origin.startsWith('https://')||process.env.COOKIE_SECURE!=='true'))throw new Error('Production requires HTTPS APP_ORIGIN and COOKIE_SECURE=true.');
  const app=Fastify({bodyLimit:8*1024*1024,trustProxy:process.env.TRUST_PROXY==='true',logger:{level:'info',redact:['req.headers.cookie','req.headers.authorization','req.body','res.headers.set-cookie']},disableRequestLogging:true});
- const redis=new Redis(process.env.REDIS_URL||'redis://localhost:6379',{maxRetriesPerRequest:null});
+ const redis=new Redis(process.env.REDIS_URL||'redis://localhost:6379',{
+  maxRetriesPerRequest:1,
+  connectTimeout:5000,
+  retryStrategy:(attempt)=>Math.min(attempt*250,2000)
+ });
  const queue=new Queue('sql-arena',{connection:redis});
  await app.register(cookie);await app.register(rateLimit,{max:180,timeWindow:'1 minute',redis,skipOnError:false});
  await app.register(swagger,{openapi:{info:{title:'SQL Arena API',version:'1.0.0'},servers:[{url:origin}]}});

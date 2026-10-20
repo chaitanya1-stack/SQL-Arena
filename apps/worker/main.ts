@@ -237,6 +237,7 @@ export async function startWorker() {
 
   let dispatching = false;
   let lastCleanup = 0;
+  let lastRecovery = 0;
 
   async function dispatch() {
     if (dispatching) return;
@@ -244,17 +245,12 @@ export async function startWorker() {
     dispatching = true;
 
     try {
-      if (Date.now() - lastCleanup > 60000) {
-        lastCleanup = Date.now();
-
-        await db.query(
-          `UPDATE question_versions
-           SET validation_status = 'failed',
-               validation_report = '{"error":"Validation worker stopped; retry validation."}'
-           WHERE validation_status = 'running'
-             AND validation_started_at < now() - interval '5 minutes'`
-        );
+      if (Date.now() - lastCleanup < 1000) {
+        // Normal dispatch continues below.
       }
+
+      if (Date.now() - lastRecovery >= 30000) {
+        lastRecovery = Date.now();
 
       const expired = await db.query(
         `SELECT id FROM mocks
@@ -326,6 +322,11 @@ export async function startWorker() {
         );
       }
 
+      }
+
+      if (Date.now() - lastCleanup >= 60000) {
+        lastCleanup = Date.now();
+
       await db.query(
         'DELETE FROM sessions WHERE expires_at < now()'
       );
@@ -339,6 +340,15 @@ export async function startWorker() {
          WHERE role = 'guest'
            AND created_at < now() - interval '30 days'`
       );
+
+      await db.query(
+        `UPDATE question_versions
+         SET validation_status = 'failed',
+             validation_report = '{"error":"Validation worker stopped; retry validation."}'
+         WHERE validation_status = 'running'
+           AND validation_started_at < now() - interval '5 minutes'`
+      );
+      }
     } catch (error) {
       console.error(
         '[worker] Dispatch failed:',
@@ -351,7 +361,7 @@ export async function startWorker() {
 
   const timer = setInterval(() => {
     void dispatch();
-  }, 5000);
+  }, 30000);
 
   await dispatch();
 

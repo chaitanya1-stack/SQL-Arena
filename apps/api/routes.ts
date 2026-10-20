@@ -38,7 +38,21 @@ export async function routes(app:FastifyInstance,queue:Queue){
    if(v.mockId){const r=await c.query('SELECT m.*,mq.version_id FROM mocks m JOIN mock_questions mq ON mq.mock_id=m.id WHERE m.id=$1 AND mq.position=$2 FOR UPDATE OF m',[v.mockId,v.position]);const m=r.rows[0];if(!m||m.user_id!==req.user!.id||m.version_id!==v.versionId)throw fail('Assessment question not found.',404);if(m.ended_at||new Date(m.deadline).getTime()<=Date.now())throw fail('The assessment has ended.',409);if(m.dialect!==v.dialect)throw fail('Use the assessment dialect.');await c.query('UPDATE mock_questions SET draft=$1 WHERE mock_id=$2 AND position=$3',[v.query,v.mockId,v.position]);}
    else{const r=await c.query('SELECT 1 FROM questions WHERE published_version=$1 AND NOT archived',[v.versionId]);if(!r.rowCount)throw fail('This question version is unavailable.',404);}
    await c.query('INSERT INTO submissions(id,user_id,version_id,query,dialect,mode,mock_id) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,req.user!.id,v.versionId,v.query,v.dialect,v.mode,v.mockId||null]);
-  });return {id};
+  });
+  // Neon remains the durable record. If Redis is unavailable,
+  // the worker's periodic recovery scan will enqueue this later.
+  try {
+   await queue.add('submission', {id}, {
+    jobId:id,
+    attempts:2,
+    backoff:{type:'exponential',delay:1000},
+    removeOnComplete:{age:86400,count:10000},
+    removeOnFail:{age:86400}
+   });
+  } catch {
+   app.log.warn({submissionId:id}, 'Immediate enqueue failed; recovery scan will retry');
+  }
+  return {id};
  });
  app.get('/api/submissions/:id',{preHandler:requireUser},async req=>{const {id}=idParam.parse(req.params);const {rows}=await db.query('SELECT id,state,verdict,result,created_at,finished_at FROM submissions WHERE id=$1 AND user_id=$2',[id,req.user!.id]);if(!rows[0])throw fail('Submission not found.',404);return rows[0];});
  app.post('/api/mocks',{preHandler:requireUser,config:{rateLimit:{max:5,timeWindow:'1 minute'}}},async req=>{
@@ -78,7 +92,17 @@ export async function routes(app:FastifyInstance,queue:Queue){
  app.post('/api/admin/questions',{preHandler:requireAdmin},async req=>{const q=questionSchema.parse(req.body);await saveQuestions([q],req.user!.id);return {ok:true};});
  app.post('/api/admin/import',{preHandler:requireAdmin},async req=>{const {questions}=z.object({questions:z.array(questionSchema).min(1).max(25)}).parse(req.body);if(new Set(questions.map(q=>q.id)).size!==questions.length)throw fail('Duplicate IDs in import.');await saveQuestions(questions,req.user!.id);return {count:questions.length};});
  app.post('/api/admin/versions/:id/validate',{preHandler:requireAdmin},async req=>{
-  if(process.env.PGLITE_PILOT!=='true')throw fail('PostgreSQL validation pilot is disabled.',503);const {id}=z.object({id:z.uuid()}).parse(req.params);const r=await db.query("UPDATE question_versions SET validation_status='queued' WHERE id=$1 AND validation_status<>'running' RETURNING id",[id]);if(!r.rowCount)throw fail('Version not found or already validating.',409);await audit(req.user!.id,'question.validation.requested',{id});return {ok:true};});
+  if(process.env.PGLITE_PILOT!=='true')throw fail('PostgreSQL validation pilot is disabled.',503);const {id}=z.object({id:z.uuid()}).parse(req.params);const r=await db.query("UPDATE question_versions SET validation_status='queued' WHERE id=$1 AND validation_status<>'running' RETURNING id",[id]);if(!r.rowCount)throw fail('Version not found or already validating.',409);await audit(req.user!.id,'question.validation.requested',{id});
+  try {
+   await queue.add('validate', {id}, {
+    jobId:'validate-'+id,
+    removeOnComplete:true,
+    removeOnFail:true
+   });
+  } catch {
+   app.log.warn({versionId:id}, 'Validation enqueue failed; recovery scan will retry');
+  }
+  return {ok:true};});
  app.post('/api/admin/versions/:id/publish',{preHandler:requireAdmin},async req=>{const {id}=z.object({id:z.uuid()}).parse(req.params);await transaction(async c=>{const {rows}=await c.query("SELECT * FROM question_versions WHERE id=$1 AND validation_status='passed' FOR UPDATE",[id]);const v=rows[0];if(!v||v.content_hash!==contentHash(v.body)||v.validation_report?.engines?.join(',')!=='postgres'||v.validation_report?.postgresCompatible!==true)throw fail('Validate this exact version using the PostgreSQL judge before publishing.',409);const q=v.body;await c.query('UPDATE questions SET published_version=$1,slug=$2,title=$3,difficulty=$4,topics=$5,companies=$6,minutes=$7,archived=false WHERE id=$8',[id,q.slug,q.title,q.difficulty,q.topics,q.companies,q.minutes,q.id]);});await audit(req.user!.id,'question.published',{id});return {ok:true};});
  app.post('/api/admin/questions/:id/unpublish',{preHandler:requireAdmin},async req=>{const {id}=idParam.parse(req.params);await db.query('UPDATE questions SET published_version=NULL WHERE id=$1',[id]);await audit(req.user!.id,'question.unpublished',{id});return {ok:true};});
  app.delete('/api/admin/questions/:id',{preHandler:requireAdmin},async req=>{const {id}=idParam.parse(req.params);await db.query('UPDATE questions SET archived=true WHERE id=$1',[id]);await audit(req.user!.id,'question.archived',{id});return {ok:true};});

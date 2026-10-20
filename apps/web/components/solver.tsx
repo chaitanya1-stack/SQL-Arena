@@ -16,7 +16,7 @@ export function Solver({id,user,onBack,onSignIn,provided,mock}:{id:string,user:U
  const key=`arena-draft:${user?.id||'anonymous'}:${q?.versionId}:${dialect}`;
  useEffect(()=>{saveReady.current=false;setCode(mock?mock.draft:localStorage.getItem(key)||'-- Write your SQL query here\nSELECT ');setJobId(null);setError('');setSolution(null);saveReady.current=true;},[q?.versionId,dialect,key,mock?.id,mock?.position]);
  useEffect(()=>{if(saveReady.current&&!mock&&q)localStorage.setItem(key,code);},[code,key,mock,q]);
- const job=useQuery({queryKey:['job',jobId],queryFn:()=>api<Job>('/submissions/'+jobId),enabled:!!jobId,refetchInterval:query=>query.state.data?.state==='done'?false:1200});
+ const job=useQuery({queryKey:['job',jobId],queryFn:()=>api<Job>('/submissions/'+jobId),enabled:!!jobId,refetchInterval:query=>query.state.data?.state==='done'?false:2000});
  const busy=sending||(!!jobId&&job.data?.state!=='done'&&!job.error);
  async function run(mode:'run'|'submit'){
   if(!user)return onSignIn();if(!q)return;setError('');setSolution(null);setSending(true);try{const r=await post<{id:string}>('/submissions',{versionId:q.versionId,query:code,dialect,mode,...(mock?{mockId:mock.id,position:mock.position}:{})});setJobId(r.id);setResultsTab('result');}catch(e){setError((e as Error).message);}finally{setSending(false);}
