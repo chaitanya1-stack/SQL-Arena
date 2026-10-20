@@ -7,6 +7,7 @@ import {Redis} from 'ioredis';
 import {Queue} from 'bullmq';
 import {ZodError} from 'zod';
 import {db} from './db.js';
+import {startWorker} from '../worker/main.js';
 import {authRoutes,requireAdmin} from './auth.js';
 import {routes} from './routes.js';
 export async function buildApp(){
@@ -27,4 +28,13 @@ export async function buildApp(){
  app.get('/api/health',async()=>{await db.query('SELECT 1');await redis.ping();return {ok:true};});
  app.addHook('onClose',async()=>{await queue.close();await redis.quit();await db.end();});return app;
 }
-if(process.env.ARENA_TEST!=='true'){const app=await buildApp();await app.listen({host:'0.0.0.0',port:Number(process.env.PORT||4000)});for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>void app.close());}
+if(process.env.ARENA_TEST!=='true'){
+ const app=await buildApp();
+ let stopWorker:(()=>Promise<void>)|undefined;
+ if(process.env.PGLITE_PILOT==='true'){
+  stopWorker=await startWorker();
+  app.addHook('onClose',async()=>{await stopWorker?.();});
+ }
+ await app.listen({host:'0.0.0.0',port:Number(process.env.PORT||4000)});
+ for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>void app.close());
+}
