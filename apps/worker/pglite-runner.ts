@@ -1,194 +1,152 @@
 
 import { PGlite } from '@electric-sql/pglite';
+import { createInterface } from 'node:readline';
 import { queryPolicy } from '../../packages/core/query-policy.js';
 
-type RunnerInput = {
+type Request = {
   schema: string;
   setup: string;
   sql: string;
 };
 
-type RunnerResult = {
-  columns?: string[];
-  rows?: unknown[][];
-  elapsedMs?: number;
-  error?: string;
-  verdict?: string;
-};
-
-const MAX_INPUT_BYTES = 500_000;
-const MAX_OUTPUT_ROWS = 1000;
-const MAX_OUTPUT_COLUMNS = 30;
-
-async function readStdin(): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    let input = '';
-    let bytes = 0;
-    let finished = false;
-
-    function fail(error: Error) {
-      if (finished) return;
-      finished = true;
-      reject(error);
-    }
-
-    process.stdin.setEncoding('utf8');
-
-    process.stdin.on('data', (chunk: string) => {
-      if (finished) return;
-
-      bytes += Buffer.byteLength(chunk, 'utf8');
-
-      if (bytes > MAX_INPUT_BYTES) {
-        fail(new Error('Runner input too large.'));
-        process.stdin.pause();
-        return;
-      }
-
-      input += chunk;
-    });
-
-    process.stdin.on('end', () => {
-      if (finished) return;
-      finished = true;
-      resolve(input);
-    });
-
-    process.stdin.on('error', (error) => {
-      fail(error);
-    });
-
-    process.stdin.resume();
-  });
+function send(value: Record<string, unknown>) {
+  process.stdout.write(JSON.stringify(value) + '\n');
 }
 
-function normalizeValue(value: unknown): unknown {
-  if (value === null || value === undefined) {
-    return null;
-  }
+function normalize(value: unknown, typeId: number): unknown {
+  if (value === null || value === undefined) return null;
 
   if (value instanceof Date) {
-    return value.toISOString();
+    if (typeId === 1082) {
+      return value.toISOString().slice(0, 10);
+    }
+    return value.toISOString().slice(0, 19).replace('T', ' ');
   }
 
-  if (typeof value === 'bigint') {
-    return value.toString();
-  }
+  if (typeof value === 'bigint') return value.toString();
 
   if (typeof value === 'number' && !Number.isFinite(value)) {
     return String(value);
   }
 
-  if (typeof value === 'object') {
-    return JSON.stringify(value);
-  }
-
   return value;
 }
 
-async function execute(
-  input: RunnerInput
-): Promise<RunnerResult> {
-  const { schema, setup, sql } = input;
-
-  if (
-    typeof schema !== 'string' ||
-    typeof setup !== 'string' ||
-    typeof sql !== 'string'
-  ) {
-    return {
-      verdict: 'Internal Judge Error',
-      error: 'Invalid runner input.'
-    };
+const db = new PGlite({
+  parsers: {
+    1082: (value) => value,
+    1114: (value) => value,
+    1184: (value) => value
   }
+});
 
-  const policyError = queryPolicy(sql);
+try {
+  // Wait until the WebAssembly database can execute queries.
+  await db.query('SELECT 1');
 
-  if (policyError) {
-    return {
-      verdict: 'Unsupported Query',
-      error: policyError
-    };
-  }
-
-  const db = new PGlite({
-    parsers: {
-      1082: (value) => value,
-      1114: (value) => value,
-      1184: (value) => value
-    }
+  // The parent process waits for this exact signal.
+  send({ type: 'ready' });
+} catch {
+  send({
+    type: 'fatal',
+    error: 'PGlite initialization failed.'
   });
+  process.exit(1);
+}
 
+const input = createInterface({
+  input: process.stdin,
+  crlfDelay: Infinity
+});
+
+// Handle multiple datasets within one runner process.
+for await (const line of input) {
   try {
-    // These must come from trusted question-bank content.
-    await db.exec(schema);
-    await db.exec(setup);
+    if (Buffer.byteLength(line, 'utf8') > 500_000) {
+      send({
+        type: 'result',
+        verdict: 'Resource Limit Exceeded',
+        error: 'Runner input is too large.'
+      });
+      continue;
+    }
 
-    const started = Date.now();
+    const request = JSON.parse(line) as Request;
 
-    const result = await db.query(sql, [], {
+    if (
+      typeof request.schema !== 'string' ||
+      typeof request.setup !== 'string' ||
+      typeof request.sql !== 'string'
+    ) {
+      send({
+        type: 'result',
+        verdict: 'Internal Judge Error',
+        error: 'Invalid runner request.'
+      });
+      continue;
+    }
+
+    const policyError = queryPolicy(request.sql);
+
+    if (policyError) {
+      send({
+        type: 'result',
+        verdict: 'Unsupported Query',
+        error: policyError
+      });
+      continue;
+    }
+
+    // Reset database state before each dataset.
+    await db.exec(
+      'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;'
+    );
+
+    await db.exec(request.schema);
+    await db.exec(request.setup);
+
+    const started = performance.now();
+
+    const result = await db.query(request.sql, [], {
       rowMode: 'array'
     });
 
-    const elapsedMs = Date.now() - started;
+    const elapsedMs = Math.round(performance.now() - started);
 
-    const columns = result.fields.map(
-      (field) => field.name
-    );
-
-    if (
-      columns.length > MAX_OUTPUT_COLUMNS ||
-      result.rows.length > MAX_OUTPUT_ROWS
-    ) {
-      return {
+    if (result.fields.length > 30 || result.rows.length > 1000) {
+      send({
+        type: 'result',
         verdict: 'Resource Limit Exceeded',
         error: 'Query result exceeds the allowed limits.'
-      };
+      });
+      continue;
     }
 
-    const rows = (result.rows as unknown[][]).map(
-      (row) => row.map(normalizeValue)
+    const columns = result.fields.map(field => field.name);
+
+    const rows = (result.rows as unknown[][]).map(row =>
+      row.map((value, index) =>
+        normalize(value, result.fields[index].dataTypeID)
+      )
     );
 
-    return {
+    send({
+      type: 'result',
       columns,
       rows,
       elapsedMs
-    };
+    });
   } catch (error) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : 'Query execution failed.';
+    const message = error instanceof Error
+      ? error.message
+      : 'Query execution failed.';
 
-    return {
+    send({
+      type: 'result',
       verdict: 'Runtime Error',
       error: message.slice(0, 500)
-    };
-  } finally {
-    await db.close();
+    });
   }
 }
 
-async function main(): Promise<void> {
-  let output: RunnerResult;
-
-  try {
-    const raw = await readStdin();
-
-    const input = JSON.parse(raw) as RunnerInput;
-
-    output = await execute(input);
-  } catch {
-    output = {
-      verdict: 'Internal Judge Error',
-      error: 'Unable to initialize PostgreSQL runner.'
-    };
-  }
-
-  process.stdout.write(
-    JSON.stringify(output) + '\n'
-  );
-}
-
-await main();
+await db.close();
