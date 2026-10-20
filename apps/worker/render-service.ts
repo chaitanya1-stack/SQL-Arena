@@ -1,6 +1,15 @@
 import { createServer } from 'node:http';
 import { startWorker } from './main.js';
 
+setInterval(() => {
+  const m = process.memoryUsage();
+  console.log('[memory]', JSON.stringify({
+    rssMB: Math.round(m.rss / 1024 / 1024),
+    heapMB: Math.round(m.heapUsed / 1024 / 1024),
+    externalMB: Math.round(m.external / 1024 / 1024)
+  }));
+}, 5000);
+
 if (process.env.PGLITE_PILOT !== 'true') {
   throw new Error('PGLITE_PILOT must be true');
 }
