@@ -33,9 +33,27 @@ class Runner {
    if(this.bytes>MAX_OUTPUT_BYTES){this.fail(new JudgeError('Resource Limit Exceeded','Runner output too large.'));return;}
    try{const response=JSON.parse(line) as Reply;this.waiting?.(response);}catch{this.fail(new JudgeError('Internal Judge Error','Malformed runner response.'));}
   });
-  this.child.stderr.resume(); // Drain stderr without exposing SQL or credentials.
+  this.child.stderr.on('data', (chunk: Buffer) => {
+    console.error(
+      '[pglite-child-stderr]',
+      chunk.toString('utf8').slice(0, 1500)
+    );
+  });
+
+  console.info('[pglite] child spawned pid=' + this.child.pid); // Drain stderr without exposing SQL or credentials.
   this.child.on('error',()=>this.fail(new JudgeError('Internal Judge Error','PGlite process could not start.')));
-  this.child.on('close',()=>this.fail(new JudgeError('Internal Judge Error','PGlite runner stopped unexpectedly.')));
+  this.child.on('close', (code, signal) => {
+    console.error(
+      `[pglite] child exited code=${code} signal=${signal}`
+    );
+
+    this.fail(
+      new JudgeError(
+        'Internal Judge Error',
+        'PGlite runner stopped unexpectedly.'
+      )
+    );
+  });
   this.child.stdin.on('error',()=>{});
   this.ready=this.request(undefined,READY_TIMEOUT_MS).then(response=>{
    if(response.type!=='ready')throw new JudgeError('Internal Judge Error','Runner not ready.');

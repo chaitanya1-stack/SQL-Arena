@@ -42,7 +42,11 @@ const db = new PGlite({
 
 try {
   // Wait until the WebAssembly database can execute queries.
+  console.error('[pglite-child] Starting WASM initialization');
+
   await db.query('SELECT 1');
+
+  console.error('[pglite-child] WASM initialization completed');
 
   // The parent process waits for this exact signal.
   send({ type: 'ready' });
