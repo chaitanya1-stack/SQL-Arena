@@ -35,7 +35,7 @@ export async function buildApp(){
 if(process.env.ARENA_TEST!=='true'){
  const app=await buildApp();
  let stopWorker:(()=>Promise<void>)|undefined;
- if(process.env.PGLITE_PILOT==='true'){
+ if(process.env.PGLITE_PILOT==='true' && process.env.RUN_WORKER_IN_API!=='false'){
   stopWorker=await startWorker();
   app.addHook('onClose',async()=>{await stopWorker?.();});
  }
