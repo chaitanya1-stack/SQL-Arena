@@ -11,7 +11,7 @@ import { warmPglite, stopWarmPglite } from './sandbox.js';
 export async function startWorker() {
   console.info('[worker] Starting SQL Arena PostgreSQL worker');
 
-  if (process.env.PGLITE_PILOT === 'true') {
+  if (process.env.PGLITE_PILOT === 'true' && process.env.PGLITE_PREWARM === 'true') {
     console.info('[pglite] Starting background prewarm');
 
     void warmPglite()
