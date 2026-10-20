@@ -1,0 +1,14 @@
+FROM node:22-bookworm-slim AS runtime
+WORKDIR /runner
+RUN npm init -y && npm install --omit=dev --save-exact pg@8.16.3 pg-cursor@2.15.3 mysql2@3.15.3
+COPY apps/worker/runner.cjs /runner/run.cjs
+
+FROM postgres:16-bookworm AS postgres
+COPY --from=runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=runtime /runner /arena-runner
+RUN node --version
+
+FROM mysql:8.4 AS mysql
+COPY --from=runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=runtime /runner /arena-runner
+RUN node --version

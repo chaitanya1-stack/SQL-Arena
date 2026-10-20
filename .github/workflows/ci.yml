@@ -1,0 +1,45 @@
+name: Validate SQL Arena
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  application:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env: {POSTGRES_USER: arena, POSTGRES_PASSWORD: ci-test-only, POSTGRES_DB: arena}
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U arena -d arena" --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    env:
+      DATABASE_URL: postgresql://arena:ci-test-only@localhost:5432/arena
+      REDIS_URL: redis://localhost:6379
+      APP_ORIGIN: http://localhost:3000
+      NEXT_TELEMETRY_DISABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 22, cache: npm}
+      - run: npm ci
+      - run: npm test
+      - run: npm run check:content
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run migrate
+      - run: node --import tsx --test tests/integration/platform.test.ts
+  database-engines:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 22, cache: npm}
+      - run: npm ci
+      - run: docker build --target postgres -f Dockerfile.sandbox -t sql-arena-postgres .
+      - run: docker build --target mysql -f Dockerfile.sandbox -t sql-arena-mysql .
+      - run: node --import tsx --test tests/integration/judge.test.ts
+      - run: npm run validate:bank
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: dual-engine-validation, path: content/validation-report.json}

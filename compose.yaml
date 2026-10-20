@@ -1,0 +1,79 @@
+name: sql-arena
+services:
+  db:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: arena
+      POSTGRES_DB: arena
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run node scripts/configure.mjs first}
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["platform-db:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arena -d arena"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: ["queue-data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  api:
+    build: {context: ., target: api}
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://arena:${POSTGRES_PASSWORD}@db:5432/arena
+      REDIS_URL: redis://redis:6379
+    command: ["sh", "-c", "npm run migrate && npm run api"]
+    ports: ["127.0.0.1:4000:4000"]
+    volumes: ["./content:/app/content:ro"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  web:
+    build: {context: ., target: web, args: {API_INTERNAL_URL: "http://api:4000"}}
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+  worker:
+    build: {context: ., target: worker}
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://arena:${POSTGRES_PASSWORD}@db:5432/arena
+      REDIS_URL: redis://redis:6379
+      JUDGE_POSTGRES_IMAGE: sql-arena-postgres
+      JUDGE_MYSQL_IMAGE: sql-arena-mysql
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock", "./content:/app/content:ro"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    restart: unless-stopped
+    stop_grace_period: 180s
+  tools:
+    profiles: ["tools"]
+    build: {context: ., target: worker}
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://arena:${POSTGRES_PASSWORD}@db:5432/arena
+      REDIS_URL: redis://redis:6379
+      JUDGE_POSTGRES_IMAGE: sql-arena-postgres
+      JUDGE_MYSQL_IMAGE: sql-arena-mysql
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock", "./content:/app/content"]
+    command: ["npm", "run", "validate:bank"]
+volumes:
+  platform-db:
+  queue-data:

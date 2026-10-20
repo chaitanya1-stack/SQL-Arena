@@ -1,0 +1,70 @@
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Next.js
+.next/
+**/.next/
+out/
+dist/
+build/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing and coverage
+coverage/
+playwright-report/
+test-results/
+.nyc_output/
+
+# TypeScript
+*.tsbuildinfo
+
+# SQL Arena validation
+content/validation-report.json
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.dump
+*.sql.gz
+backups/
+data/
+postgres_data/
+mysql_data/
+redis_data/
+
+# Monaco editor generated assets
+apps/web/public/monaco/
+
+# OS and IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
