@@ -131,6 +131,39 @@ export async function routes(app:FastifyInstance,queue:Queue){
    app.log.warn({versionId:id}, 'Validation enqueue failed; recovery scan will retry');
   }
   return {ok:true};});
+ app.post('/api/admin/publish-all-validated',{preHandler:requireAdmin,config:{rateLimit:{max:2,timeWindow:'1 minute'}}},async req=>{
+  // Recheck everything on the server; never trust the admin UI's displayed counts.
+  const result=await transaction(async c=>{
+   const {rows}=await c.query(`SELECT q.id AS question_id,q.published_version,
+      v.id AS version_id,v.body,v.content_hash,v.validation_status,v.validation_report
+      FROM questions q
+      JOIN LATERAL (
+       SELECT id,body,content_hash,validation_status,validation_report
+       FROM question_versions WHERE question_id=q.id ORDER BY version DESC LIMIT 1
+      ) v ON true
+      WHERE NOT q.archived ORDER BY q.id FOR UPDATE OF q`);
+   let published=0,alreadyPublished=0,skipped=0;
+   for(const row of rows){
+    if(row.published_version===row.version_id){alreadyPublished++;continue;}
+    const report=row.validation_report;
+    if(row.validation_status!=='passed'||
+       report?.engines?.join(',')!=='postgres'||
+       report?.postgresCompatible!==true||
+       row.content_hash!==contentHash(row.body)){
+     skipped++;continue;
+    }
+    const q=questionSchema.parse(row.body);
+    await c.query(`UPDATE questions SET published_version=$1,slug=$2,title=$3,
+        difficulty=$4,topics=$5,companies=$6,minutes=$7
+        WHERE id=$8 AND NOT archived`,
+      [row.version_id,q.slug,q.title,q.difficulty,q.topics,q.companies,q.minutes,row.question_id]);
+    published++;
+   }
+   return {published,alreadyPublished,skipped,total:rows.length};
+  });
+  await audit(req.user!.id,'question.published.bulk',result);
+  return {ok:true,...result};
+ });
  app.post('/api/admin/versions/:id/publish',{preHandler:requireAdmin},async req=>{const {id}=z.object({id:z.uuid()}).parse(req.params);await transaction(async c=>{const {rows}=await c.query("SELECT * FROM question_versions WHERE id=$1 AND validation_status='passed' FOR UPDATE",[id]);const v=rows[0];if(!v||v.content_hash!==contentHash(v.body)||v.validation_report?.engines?.join(',')!=='postgres'||v.validation_report?.postgresCompatible!==true)throw fail('Validate this exact version using the PostgreSQL judge before publishing.',409);const q=v.body;await c.query('UPDATE questions SET published_version=$1,slug=$2,title=$3,difficulty=$4,topics=$5,companies=$6,minutes=$7,archived=false WHERE id=$8',[id,q.slug,q.title,q.difficulty,q.topics,q.companies,q.minutes,q.id]);});await audit(req.user!.id,'question.published',{id});return {ok:true};});
  app.post('/api/admin/questions/:id/unpublish',{preHandler:requireAdmin},async req=>{const {id}=idParam.parse(req.params);await db.query('UPDATE questions SET published_version=NULL WHERE id=$1',[id]);await audit(req.user!.id,'question.unpublished',{id});return {ok:true};});
  app.delete('/api/admin/questions/:id',{preHandler:requireAdmin},async req=>{const {id}=idParam.parse(req.params);await db.query('UPDATE questions SET archived=true WHERE id=$1',[id]);await audit(req.user!.id,'question.archived',{id});return {ok:true};});
