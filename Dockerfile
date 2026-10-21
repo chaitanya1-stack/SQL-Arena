@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends docker.io ca-ce
 CMD ["npm","run","worker"]
 
 FROM base AS web-build
-ARG API_INTERNAL_URL=http://api:4000
+ARG API_INTERNAL_URL=https://sql-arena-n8k3.onrender.com
 ENV API_INTERNAL_URL=$API_INTERNAL_URL
 RUN npm run build
 
