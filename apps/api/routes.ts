@@ -91,6 +91,34 @@ export async function routes(app:FastifyInstance,queue:Queue){
  async function saveQuestions(questions:Question[],userId:string){await transaction(async c=>{for(const q of questions){await c.query('INSERT INTO questions(id,slug,title,difficulty,topics,companies,minutes) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING',[q.id,q.slug,q.title,q.difficulty,q.topics,q.companies,q.minutes]);await c.query('SELECT id FROM questions WHERE id=$1 FOR UPDATE',[q.id]);const n=(await c.query('SELECT COALESCE(max(version),0)+1 AS n FROM question_versions WHERE question_id=$1',[q.id])).rows[0].n;await c.query('INSERT INTO question_versions(id,question_id,version,body,content_hash) VALUES($1,$2,$3,$4,$5)',[randomUUID(),q.id,n,JSON.stringify(q),contentHash(q)]);}});await audit(userId,'questions.saved',{ids:questions.map(q=>q.id)});}
  app.post('/api/admin/questions',{preHandler:requireAdmin},async req=>{const q=questionSchema.parse(req.body);await saveQuestions([q],req.user!.id);return {ok:true};});
  app.post('/api/admin/import',{preHandler:requireAdmin},async req=>{const {questions}=z.object({questions:z.array(questionSchema).min(1).max(25)}).parse(req.body);if(new Set(questions.map(q=>q.id)).size!==questions.length)throw fail('Duplicate IDs in import.');await saveQuestions(questions,req.user!.id);return {count:questions.length};});
+ // Queue only latest non-archived question versions needing validation.
+ // Stored version statuses also provide durable progress across reloads.
+ app.post('/api/admin/validate-all',{preHandler:requireAdmin,config:{rateLimit:{max:2,timeWindow:'1 minute'}}},async req=>{
+  if(process.env.PGLITE_PILOT!=='true')throw fail('PostgreSQL validation pilot is disabled.',503);
+  const {rows}=await db.query(`
+   WITH latest AS (
+    SELECT DISTINCT ON (v.question_id) v.id, v.validation_status
+    FROM question_versions v JOIN questions q ON q.id=v.question_id
+    WHERE NOT q.archived
+    ORDER BY v.question_id, v.version DESC
+   )
+   UPDATE question_versions v SET validation_status='queued', validation_report=NULL
+   FROM latest l
+   WHERE v.id=l.id AND l.validation_status NOT IN ('passed','queued','running')
+   RETURNING v.id`);
+  let enqueued=0;
+  // Jobs are safe to recover: the existing worker scans queued versions periodically.
+  for(const row of rows){
+   try{
+    await queue.add('validate',{id:row.id},{jobId:'validate-'+row.id,removeOnComplete:true,removeOnFail:true});
+    enqueued++;
+   }catch(error){
+    app.log.warn({versionId:row.id,error:error instanceof Error?error.message:'enqueue failed'},'Bulk validation enqueue failed; worker recovery will retry');
+   }
+  }
+  await audit(req.user!.id,'question.validation.bulk',{queued:rows.length,enqueued});
+  return {ok:true,queued:rows.length,enqueued};
+ });
  app.post('/api/admin/versions/:id/validate',{preHandler:requireAdmin},async req=>{
   if(process.env.PGLITE_PILOT!=='true')throw fail('PostgreSQL validation pilot is disabled.',503);const {id}=z.object({id:z.uuid()}).parse(req.params);const r=await db.query("UPDATE question_versions SET validation_status='queued' WHERE id=$1 AND validation_status<>'running' RETURNING id",[id]);if(!r.rowCount)throw fail('Version not found or already validating.',409);await audit(req.user!.id,'question.validation.requested',{id});
   try {
